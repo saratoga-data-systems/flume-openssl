@@ -38,7 +38,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 case "$(uname -m)" in
   x86_64)    ARCH=x86_64_linux;   CONF=linux-x86_64;  HARDEN_ARCH="-fcf-protection=full" ;;
   aarch64)   ARCH=aarch64_linux;  CONF=linux-aarch64; HARDEN_ARCH="-mbranch-protection=standard" ;;
-  armv7l)    ARCH=armv7l_linux;   CONF=linux-armv4;   HARDEN_ARCH="" ;;
+  armv7l|armv8l) ARCH=armv7l_linux; CONF=linux-armv4; HARDEN_ARCH="" ;;  # armv8l = 32-bit container on an ARMv8 host (e.g. the Pi under setarch linux32)
   i686|i386) ARCH=i686_linux;     CONF=linux-x86;     HARDEN_ARCH="-fcf-protection=full" ;;
   *) echo "ERROR: unmapped arch $(uname -m)" >&2; exit 1 ;;
 esac
