@@ -1,0 +1,88 @@
+#!/bin/bash
+#
+# build-fips-provider — reproducibly build the CMVP #4985 OpenSSL FIPS provider
+# (fips.so) from the *validated* OpenSSL 3.1.2 source, for Flume's
+# static-base-library + dynamically-loaded-FIPS-module architecture.
+#
+# Run NATIVELY on each target platform (this handles the Linux family; Windows
+# and Android have companion scripts).  It builds ONLY fips.so — the validated
+# cryptographic boundary.  The base libcrypto/libssl come from a separate
+# current-3.5.x build and stay statically linked into flume.
+#
+# IMPORTANT (per 140sp4985.pdf — the #4985 Security Policy):
+#   * Source is pinned to OpenSSL 3.1.2, the exact CMVP #4985 validated version.
+#     Do NOT bump it — a different source is no longer the validated module.
+#   * Build the module per §11: `./Configure enable-fips`.  Do NOT add
+#     -fcf-protection / -fstack-protector / other hardening flags — build changes
+#     that alter generated code void the validation.  (Harden the base library +
+#     the flume app instead; those are outside the FIPS boundary.)
+#   * To MATCH the validated build (§5.3) AND get ONE portable .so for the whole
+#     arch family, build the x86_64 module on the LOWEST-glibc tested OE:
+#     Debian 11.5 / gcc 10.2.1 (glibc 2.31).  One fips.so then runs across modern
+#     x86_64 Linux (RHEL 9 = 2.34, Ubuntu 20.04+, Debian 11/12).  (Ubuntu 22.04 /
+#     gcc 11.2.0 is also a tested OE but glibc 2.35 = narrower reach.)  Cutoff: a
+#     glibc-2.31 .so won't load on RHEL 8 (2.28) or older.  Non-tested OEs
+#     (aarch64/armv7l/i686) have no validated config to match — build per policy
+#     and rely on the FIPS 140-3 operational-environment portability provision.
+#
+# Usage:
+#   ./build-fips-provider                       # native build for this arch
+#   CC=gcc-11 ./build-fips-provider             # match a §5.3 tested compiler
+#   DEST_DIR=/tmp/proof ./build-fips-provider   # build without touching the repo
+#
+set -euo pipefail
+
+OSSL_VER="${OSSL_VER:-3.1.2}"   # CMVP #4985 validated source — do NOT change
+EXPECTED_SHA256="${EXPECTED_SHA256:-a0ce69b8b97ea6a35b96875235aa453b966ba3cba8af2de23657d8b6767d6539}"
+JOBS="${JOBS:-$(nproc)}"
+WORK="${WORK:-/tmp/flume-fips-build}"
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+case "$(uname -m)" in
+  x86_64)    ARCH=x86_64_linux ;;
+  aarch64)   ARCH=aarch64_linux ;;
+  armv7l)    ARCH=armv7l_linux ;;
+  i686|i386) ARCH=i686_linux ;;
+  *) echo "ERROR: unmapped arch $(uname -m)" >&2; exit 1 ;;
+esac
+DEST_DIR="${DEST_DIR:-$REPO_ROOT/openssl/$ARCH}"
+
+echo ">>> OpenSSL $OSSL_VER FIPS provider — arch=$ARCH  dest=$DEST_DIR"
+echo ">>> CC=${CC:-<platform default>}   (one portable x86_64 .so: gcc 10.2.1 / Debian 11.5, glibc 2.31)"
+[ -n "${CC:-}" ] && { "$CC" --version | head -1 || true; }
+
+mkdir -p "$WORK"; cd "$WORK"
+TARBALL="openssl-$OSSL_VER.tar.gz"
+[ -f "$TARBALL" ] || curl -fSL -o "$TARBALL" \
+  "https://github.com/openssl/openssl/releases/download/openssl-$OSSL_VER/$TARBALL"
+echo "$EXPECTED_SHA256  $TARBALL" | sha256sum -c - \
+  || { echo "ERROR: SHA-256 mismatch (got $(sha256sum "$TARBALL" | cut -d' ' -f1))" >&2; exit 1; }
+
+rm -rf "openssl-$OSSL_VER"
+tar xzf "$TARBALL"
+cd "openssl-$OSSL_VER"
+
+CONFIGURE_ARGS=(enable-fips)
+[ -n "${CC:-}" ] && CONFIGURE_ARGS+=("CC=$CC")
+echo ">>> ./Configure ${CONFIGURE_ARGS[*]}"
+./Configure "${CONFIGURE_ARGS[@]}"
+make -j"$JOBS"
+
+test -f providers/fips.so || { echo "ERROR: providers/fips.so not built" >&2; exit 1; }
+mkdir -p "$DEST_DIR"
+cp providers/fips.so "$DEST_DIR/fips.so"
+echo ">>> wrote $DEST_DIR/fips.so"
+sha256sum "$DEST_DIR/fips.so"
+
+# Reference fipsmodule.cnf — proves the module passes its power-on self-tests
+# (KATs) + records the integrity MAC.  The SHIPPED fipsmodule.cnf is regenerated
+# per-target at install time (`flume --fips-install`), since the MAC is computed
+# over the on-disk module file.  LD_LIBRARY_PATH points the freshly-built
+# apps/openssl at the just-built libssl.so.3/libcrypto.so.3 in the build root
+# (they are not installed system-wide), else it can't start to run the check.
+LD_LIBRARY_PATH="$PWD" ./apps/openssl fipsinstall -module "$DEST_DIR/fips.so" \
+  -out "$DEST_DIR/fipsmodule.cnf.sample" -provider_name fips \
+  && echo ">>> fipsinstall OK (KATs passed) -> $DEST_DIR/fipsmodule.cnf.sample" \
+  || echo ">>> WARNING: sample fipsinstall failed (non-fatal for the build)"
+
+echo ">>> done."

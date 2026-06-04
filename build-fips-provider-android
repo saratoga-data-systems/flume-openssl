@@ -1,0 +1,84 @@
+#!/bin/bash
+#
+# build-fips-provider-android — Android (NDK) companion to build-fips-provider.
+# Cross-compiles the CMVP #4985 OpenSSL FIPS provider (fips.so) from the
+# *validated* OpenSSL 3.1.2 source for the Android ABIs, via the NDK.
+#
+# Android is a VENDOR-AFFIRMED OE for #4985 (NOT a tested OE; the NDK clang is
+# not a §5.3 compiler) — the same tier as aarch64/32-bit Linux: it runs the
+# validated SOURCE in FIPS mode (self-tests + integrity check + security-checks
+# all active), but the CMVP certificate formally covers only the tested server
+# OEs.  This is for the ATAK client (Flume-android2, built as a shared .so).
+#
+# Run on a Linux host with the NDK — the `androidbuild` docker image that
+# DockerBuildAndroid uses, or any box with $ANDROID_NDK_ROOT set (matches
+# Flume-android2's ndkVersion).  Produces fips.so per ABI; APK PACKAGING (rename
+# to lib*.so so Android extracts it, plus the on-device fipsmodule.cnf) is
+# handled by the Android FIPS integration, not here.
+#
+# IMPORTANT (per 140sp4985.pdf): source pinned to OpenSSL 3.1.2 (the validated
+# version); Configure enable-fips per §11; NO hardening flags on the module
+# (build changes that alter generated code void the validation).
+#
+# Usage:
+#   ./build-fips-provider-android                       # all 4 ABIs
+#   ./build-fips-provider-android arm64-v8a             # one ABI
+#   ANDROID_API=28 ANDROID_NDK_ROOT=/path/to/ndk ./build-fips-provider-android
+#   OUT_DIR=/tmp/proof ./build-fips-provider-android arm64-v8a   # don't touch repo
+#
+set -euo pipefail
+
+OSSL_VER="${OSSL_VER:-3.1.2}"   # CMVP #4985 validated source — do NOT change
+EXPECTED_SHA256="${EXPECTED_SHA256:-a0ce69b8b97ea6a35b96875235aa453b966ba3cba8af2de23657d8b6767d6539}"
+ANDROID_API="${ANDROID_API:-28}"   # = Flume-android2 minSdk
+JOBS="${JOBS:-$(nproc)}"
+WORK="${WORK:-/tmp/flume-fips-build-android}"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+OUT_DIR="${OUT_DIR:-$REPO_ROOT/openssl/android}"
+
+: "${ANDROID_NDK_ROOT:?set ANDROID_NDK_ROOT to your NDK (e.g. ~/Android/Sdk/ndk/29.0.14033849)}"
+export ANDROID_NDK_ROOT
+# Per OpenSSL NOTES-ANDROID: the NDK llvm toolchain bin must be on PATH.
+export PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+
+# ABI -> OpenSSL Configure target.  Repo dir names == ABI names.
+declare -A TGT=( [arm64-v8a]=android-arm64 [armeabi-v7a]=android-arm
+                 [x86_64]=android-x86_64   [x86]=android-x86 )
+
+abis=("$@"); [ "${#abis[@]}" -eq 0 ] && abis=(arm64-v8a armeabi-v7a x86_64 x86)
+
+mkdir -p "$WORK"; cd "$WORK"
+TARBALL="openssl-$OSSL_VER.tar.gz"
+[ -f "$TARBALL" ] || curl -fSL -o "$TARBALL" \
+  "https://github.com/openssl/openssl/releases/download/openssl-$OSSL_VER/$TARBALL"
+echo "$EXPECTED_SHA256  $TARBALL" | sha256sum -c -
+
+echo ">>> NDK=$ANDROID_NDK_ROOT  API=$ANDROID_API  ABIs=${abis[*]}"
+for abi in "${abis[@]}"; do
+  tgt="${TGT[$abi]:?unknown ABI: $abi}"
+  echo "=== $abi  ($tgt, API $ANDROID_API) ==="
+  src="$WORK/src-$abi"
+  rm -rf "$src"; mkdir -p "$src"
+  tar xzf "$TARBALL" -C "$src" --strip-components=1
+  ( cd "$src"
+    # -Wno-macro-redefined: the NDK's $triarch-linux-android$API-clang wrapper
+    # already defines __ANDROID_API__, so OpenSSL's own -D__ANDROID_API__ is a
+    # (harmless) redefinition — suppress the noise; it does not alter codegen.
+    ./Configure "$tgt" -D__ANDROID_API__="$ANDROID_API" -Wno-macro-redefined enable-fips
+    # Full make: it generates the configured headers (opensslconf.h, etc.) first.
+    # A targeted `make providers/fips.so` skips that -> "opensslconf.h not found".
+    make -j"$JOBS" )
+  test -f "$src/providers/fips.so" || { echo "ERROR: providers/fips.so not built for $abi" >&2; exit 1; }
+  dest="$OUT_DIR/$abi"; mkdir -p "$dest"
+  cp "$src/providers/fips.so" "$dest/fips.so"
+  echo ">>> wrote $dest/fips.so"
+  file "$dest/fips.so"; sha256sum "$dest/fips.so"
+done
+
+echo ">>> done."
+echo ">>> NOTE: fipsmodule.cnf is NOT generated here — the cross-compiled module"
+echo ">>>       can't run on the Linux build host.  The Android FIPS integration"
+echo ">>>       generates it ON-DEVICE at first run (the device is the target"
+echo ">>>       arch); the .so is identical across installs so the integrity MAC"
+echo ">>>       is stable.  APK note: rename/ship as lib*.so (Android only"
+echo ">>>       extracts lib*.so from lib/<abi>/) or load by path from assets."

@@ -1,0 +1,81 @@
+#!/bin/bash
+#
+# build-base-libs — build Flume's BASE OpenSSL static libraries
+# (libcrypto.a / libssl.a) from CURRENT OpenSSL 3.5.x, WITH binary-hardening.
+#
+# This is the NON-FIPS base library — the EVP layer, the provider-loading
+# machinery, and the default/base providers — statically linked into flume.  It
+# is OUTSIDE the FIPS boundary, so (unlike the validated FIPS module, which is
+# pinned to 3.1.2 and built per its Security Policy with NO extra flags) the
+# base library SHOULD:
+#   * track the latest 3.5.x for CVE / bug fixes, and
+#   * carry the hardening flags (-fcf-protection, stack protector, etc.) —
+#     which also CLOSES the B2/CET rider: the unhardened OpenSSL .a is why the
+#     shipped flume binary currently advertises no CET note (the linker AND-
+#     merges GNU-property notes).  Hardening the base lib fixes that; the
+#     validated fips.so stays unhardened per its policy.
+#
+# Run natively per platform (Linux family here; Windows = build-base-libs.ps1).
+# Output: openssl/<arch>/{libcrypto,libssl}.a
+#
+# Usage:
+#   OSSL_VER=3.5.7 ./build-base-libs               # override to a newer 3.5.x
+#   DEST_DIR=/tmp/proof ./build-base-libs          # don't touch the repo
+#
+# Saves, per arch (openssl/<arch>/): libcrypto.a, libssl.a, AND the static
+# `openssl` CLI (for per-platform testing — cipher/FIPS checks, fipsinstall,
+# debugging).  The CLI is a normal `make` byproduct; no-shared makes it
+# self-contained apart from libc.
+#
+set -euo pipefail
+
+OSSL_VER="${OSSL_VER:-3.5.6}"   # latest 3.5.x LTS patch (CVE/bug fixes); bump as new ones ship
+JOBS="${JOBS:-$(nproc)}"
+WORK="${WORK:-/tmp/flume-base-libs-build}"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# arch -> repo dir, OpenSSL Configure target, arch-specific CET/branch flag
+case "$(uname -m)" in
+  x86_64)    ARCH=x86_64_linux;   CONF=linux-x86_64;  HARDEN_ARCH="-fcf-protection=full" ;;
+  aarch64)   ARCH=aarch64_linux;  CONF=linux-aarch64; HARDEN_ARCH="-mbranch-protection=standard" ;;
+  armv7l)    ARCH=armv7l_linux;   CONF=linux-armv4;   HARDEN_ARCH="" ;;
+  i686|i386) ARCH=i686_linux;     CONF=linux-x86;     HARDEN_ARCH="-fcf-protection=full" ;;
+  *) echo "ERROR: unmapped arch $(uname -m)" >&2; exit 1 ;;
+esac
+DEST_DIR="${DEST_DIR:-$REPO_ROOT/openssl/$ARCH}"
+
+# Hardening common to all arches (base lib is outside the FIPS boundary so this
+# is allowed).  -fPIC so the static objects link into the PIE flume binary.
+# i686 has never had -fstack-clash-protection (matches makefile.arch.i686_linux).
+HARDEN="-fstack-protector-strong -fPIC $HARDEN_ARCH"
+[ "$ARCH" != i686_linux ] && HARDEN="$HARDEN -fstack-clash-protection"
+
+mkdir -p "$WORK"; cd "$WORK"
+TARBALL="openssl-$OSSL_VER.tar.gz"
+URL="https://github.com/openssl/openssl/releases/download/openssl-$OSSL_VER/$TARBALL"
+[ -f "$TARBALL" ] || curl -fSL -o "$TARBALL" "$URL"
+# Verify against OpenSSL's published checksum (version-agnostic).  Best-effort:
+# if the .sha256 can't be fetched, print the computed hash to verify by hand.
+rm -f "$TARBALL.sha256"; curl -fsSL -o "$TARBALL.sha256" "$URL.sha256" 2>/dev/null || true
+if [ -s "$TARBALL.sha256" ]; then
+  echo "$(awk '{print $1}' "$TARBALL.sha256")  $TARBALL" | sha256sum -c -
+else
+  echo "WARNING: no published .sha256 fetched — verify by hand: $(sha256sum "$TARBALL" | cut -d' ' -f1)"
+fi
+
+rm -rf "openssl-$OSSL_VER"; tar xzf "$TARBALL"; cd "openssl-$OSSL_VER"
+echo ">>> Configure $CONF (static + hardened), OpenSSL $OSSL_VER, arch $ARCH"
+echo ">>> hardening: $HARDEN"
+# no-shared = static libs only; no-tests = skip the test suite (faster).
+./Configure "$CONF" no-shared no-tests $HARDEN
+make -j"$JOBS"
+
+test -f libcrypto.a && test -f libssl.a || { echo "ERROR: static libs not built" >&2; exit 1; }
+mkdir -p "$DEST_DIR"
+cp libcrypto.a libssl.a "$DEST_DIR/"
+# Save the static `openssl` CLI too — one per arch, alongside the libs +
+# fips.so — for per-platform testing (cipher/FIPS checks, fipsinstall, debug).
+test -f apps/openssl && cp apps/openssl "$DEST_DIR/openssl"
+echo ">>> wrote $DEST_DIR/{libcrypto,libssl}.a + openssl  (OpenSSL $OSSL_VER, hardened)"
+( cd "$DEST_DIR"; sha256sum libcrypto.a libssl.a openssl )
+echo ">>> done.  Relink flume against these to pick up the fixes + CET/BTI note."

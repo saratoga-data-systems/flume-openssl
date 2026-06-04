@@ -1,0 +1,2 @@
+cp /usr/local/lib/libcrypto.a aarch64_linux/
+cp /usr/local/lib/libssl.a aarch64_linux/

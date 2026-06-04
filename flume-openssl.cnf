@@ -1,0 +1,36 @@
+# Flume's private OpenSSL configuration for FIPS mode.
+# Installed to /opt/flume/etc/openssl.cnf.  Flume points OpenSSL here via
+# OPENSSL_CONF (set in sdscrypto_initialize before OpenSSL init) and at
+# /opt/flume/lib/ossl-modules via OPENSSL_MODULES, so it NEVER reads the system
+# openssl.cnf or the system module dir — zero collision with vendor OpenSSL.
+#
+# Activates the validated FIPS provider (CMVP #4985, the OpenSSL 3.1.2 module)
+# plus the base provider, and makes fips=yes the default property so every EVP
+# fetch is served by the validated module.  fipsmodule.cnf is generated on THIS
+# host at install time by `flume --fips-install` — it carries the HMAC-SHA-256
+# integrity value over this host's /opt/flume/lib/ossl-modules/fips.so, so it is
+# host-/binary-specific and is NOT shipped pre-baked.
+#
+# (Windows ships the same structure with <installdir>\etc paths substituted.)
+
+config_diagnostics = 1
+openssl_conf = openssl_init
+
+# Generated per-host by `flume --fips-install` (absolute path; OpenSSL .include
+# does not resolve relative to this file).
+.include /opt/flume/etc/fipsmodule.cnf
+
+[openssl_init]
+providers   = provider_sect
+alg_section = algorithm_sect
+
+[provider_sect]
+fips = fips_sect
+base = base_sect
+
+[base_sect]
+activate = 1
+
+[algorithm_sect]
+# Force every default EVP fetch through the FIPS provider.
+default_properties = fips=yes
