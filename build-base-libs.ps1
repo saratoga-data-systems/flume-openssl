@@ -97,5 +97,15 @@ Invoke-Checked 'nmake' @()
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 Copy-Item 'libcrypto.lib' (Join-Path $Dest 'libcrypto_static.lib') -Force
 Copy-Item 'libssl.lib'    (Join-Path $Dest 'libssl_static.lib')    -Force
+# Save the openssl CLI too (apps\openssl.exe), like the Linux build, so every
+# platform's tests can use the SAME-version bundled CLI for keygen/verify.
+# (Android is the one exception: its CLI is cross-compiled and cannot run on
+# the build host.)  The VC build emits it at apps\openssl.exe.
+if (Test-Path 'apps\openssl.exe') {
+    Copy-Item 'apps\openssl.exe' (Join-Path $Dest 'openssl.exe') -Force
+    Write-Host ">>> wrote $Dest\openssl.exe"
+} else {
+    Write-Warning 'apps\openssl.exe not found -- CLI not saved (check the nmake output)'
+}
 Write-Host ">>> wrote $Dest\libcrypto_static.lib + libssl_static.lib  (OpenSSL $OsslVer, hardened)"
 Write-Host '>>> done.  Rebuild flume.sln against these to pick up the fixes.'
