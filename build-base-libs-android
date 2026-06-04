@@ -1,0 +1,116 @@
+#!/bin/bash
+#
+# build-base-libs-android — Android (NDK) companion to build-base-libs.
+# Cross-compiles Flume's BASE OpenSSL static libs (libcrypto.a / libssl.a) from
+# CURRENT OpenSSL 3.5.x for the Android ABIs, via the NDK — WITH hardening.
+#
+# This is the NON-FIPS base library (the EVP layer, the provider-loading
+# machinery, and the default/base providers) statically linked into the Flume
+# ATAK client .so.  It is OUTSIDE the FIPS boundary, so — unlike the validated
+# FIPS module (fips.so, pinned to 3.1.2, built by build-fips-provider-android
+# with NO extra flags) — the base library SHOULD track the latest 3.5.x for
+# CVE/bug fixes and carry hardening (stack-protector + PAC/BTI on arm64 + CET
+# ENDBR on x86).  Keep OSSL_VER in lockstep with build-base-libs (Linux) and
+# build-base-libs.ps1 (Windows): the whole repo shares ONE set of openssl/
+# headers, so every arch must build the same OpenSSL version.
+#
+# Mirrors build-base-libs (Linux native) but cross-compiles per Android ABI the
+# way build-fips-provider-android does.  Run on a Linux host with the NDK — the
+# `androidbuild` docker image that DockerBuildAndroid uses (it sets
+# ANDROID_SDK_ROOT; the NDK lives under $ANDROID_SDK_ROOT/ndk/* and is
+# auto-detected below), or any box with ANDROID_NDK_ROOT set.
+#
+# From the Flume dev box, exactly like DockerBuildAndroid drives a flume build:
+#   docker run -t --rm --cpus=8 -v "$PWD:/work:z" localhost/androidbuild \
+#     bash -c 'OUT_DIR=/work/android bash /work/build-base-libs-android'
+#
+# Output: openssl/android/<abi>/{libcrypto,libssl}.a   (fips.so left untouched).
+# Unlike the Linux script it does NOT save an `openssl` CLI — the cross-compiled
+# binary can't run on the build host, and the android/<abi>/ dirs hold only the
+# base libs + fips.so.
+#
+# Usage:
+#   ./build-base-libs-android                       # all 4 ABIs
+#   ./build-base-libs-android arm64-v8a             # one ABI
+#   OSSL_VER=3.5.7 ./build-base-libs-android        # override to a newer 3.5.x
+#   OUT_DIR=/tmp/proof ./build-base-libs-android arm64-v8a   # don't touch repo
+#   ANDROID_NDK_ROOT=/path/to/ndk ./build-base-libs-android  # explicit NDK
+#
+set -euo pipefail
+
+OSSL_VER="${OSSL_VER:-3.5.6}"      # latest 3.5.x LTS patch; keep == build-base-libs
+ANDROID_API="${ANDROID_API:-28}"  # = Flume-android2 minSdk
+JOBS="${JOBS:-$(nproc)}"
+WORK="${WORK:-/tmp/flume-base-libs-build-android}"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+OUT_DIR="${OUT_DIR:-$REPO_ROOT/openssl/android}"
+
+# NDK: honor an explicit ANDROID_NDK_ROOT, else auto-pick the newest NDK under
+# the SDK (the androidbuild image sets ANDROID_SDK_ROOT but not ANDROID_NDK_ROOT).
+if [ -z "${ANDROID_NDK_ROOT:-}" ]; then
+  _sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+  if [ -n "$_sdk" ] && compgen -G "$_sdk/ndk/*" >/dev/null; then
+    ANDROID_NDK_ROOT="$(ls -d "$_sdk"/ndk/* | sort -V | tail -1)"
+  fi
+fi
+: "${ANDROID_NDK_ROOT:?set ANDROID_NDK_ROOT (or ANDROID_SDK_ROOT with an ndk/ under it)}"
+export ANDROID_NDK_ROOT
+# Per OpenSSL NOTES-ANDROID: the NDK llvm toolchain bin must be on PATH.
+export PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+
+# ABI -> OpenSSL Configure target.  Repo dir names == ABI names.
+declare -A TGT=( [arm64-v8a]=android-arm64 [armeabi-v7a]=android-arm
+                 [x86_64]=android-x86_64   [x86]=android-x86 )
+# Per-ABI hardening (on top of the common -fstack-protector-strong -fPIC):
+#   arm64  = PAC/BTI  (-mbranch-protection; meaningful on Android's arm64 loader)
+#   x86*   = CET ENDBR (-fcf-protection; harmless NOPs on CPUs without CET)
+#   arm32  = none      (matches armv7l in build-base-libs)
+declare -A HARDEN_ARCH=( [arm64-v8a]="-mbranch-protection=standard"
+                         [armeabi-v7a]=""
+                         [x86_64]="-fcf-protection=full"
+                         [x86]="-fcf-protection=full" )
+
+abis=("$@"); [ "${#abis[@]}" -eq 0 ] && abis=(arm64-v8a armeabi-v7a x86_64 x86)
+
+mkdir -p "$WORK"; cd "$WORK"
+TARBALL="openssl-$OSSL_VER.tar.gz"
+URL="https://github.com/openssl/openssl/releases/download/openssl-$OSSL_VER/$TARBALL"
+[ -f "$TARBALL" ] || curl -fSL -o "$TARBALL" "$URL"
+# Verify against OpenSSL's published checksum (version-agnostic); best-effort.
+rm -f "$TARBALL.sha256"; curl -fsSL -o "$TARBALL.sha256" "$URL.sha256" 2>/dev/null || true
+if [ -s "$TARBALL.sha256" ]; then
+  echo "$(awk '{print $1}' "$TARBALL.sha256")  $TARBALL" | sha256sum -c -
+else
+  echo "WARNING: no published .sha256 fetched — verify by hand: $(sha256sum "$TARBALL" | cut -d' ' -f1)"
+fi
+
+echo ">>> NDK=$ANDROID_NDK_ROOT  API=$ANDROID_API  OpenSSL=$OSSL_VER  ABIs=${abis[*]}"
+for abi in "${abis[@]}"; do
+  tgt="${TGT[$abi]:?unknown ABI: $abi}"
+  harden="-fstack-protector-strong -fPIC ${HARDEN_ARCH[$abi]}"
+  echo "=== $abi  ($tgt, API $ANDROID_API) ==="
+  echo ">>> hardening: $harden"
+  src="$WORK/src-$abi"
+  rm -rf "$src"; mkdir -p "$src"
+  tar xzf "$TARBALL" -C "$src" --strip-components=1
+  ( cd "$src"
+    # -Wno-macro-redefined: the NDK's clang wrapper already defines
+    # __ANDROID_API__, so OpenSSL's own -D is a harmless redefinition (no
+    # codegen change).  no-shared = static .a only; no-tests = skip the suite.
+    ./Configure "$tgt" no-shared no-tests \
+      -D__ANDROID_API__="$ANDROID_API" -Wno-macro-redefined $harden
+    # build_libs = just libcrypto.a/libssl.a (+ the generated headers they
+    # depend on); skips the apps/ CLI + tests — faster, and we ship no Android CLI.
+    make -j"$JOBS" build_libs )
+  test -f "$src/libcrypto.a" && test -f "$src/libssl.a" \
+    || { echo "ERROR: static libs not built for $abi" >&2; exit 1; }
+  dest="$OUT_DIR/$abi"; mkdir -p "$dest"
+  cp "$src/libcrypto.a" "$src/libssl.a" "$dest/"
+  echo ">>> wrote $dest/{libcrypto,libssl}.a  (OpenSSL $OSSL_VER, hardened)"
+  ( cd "$dest"; sha256sum libcrypto.a libssl.a )
+  file "$dest/libcrypto.a" 2>/dev/null || true
+done
+
+echo ">>> done.  Rebuild the Flume-android2 .so against these to pick up the fixes."
+echo ">>> NOTE: fips.so (validated 3.1.2) is left untouched — built separately by"
+echo ">>>       build-fips-provider-android and pinned per its Security Policy."
