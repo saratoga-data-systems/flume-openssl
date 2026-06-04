@@ -72,7 +72,8 @@ for abi in "${abis[@]}"; do
   dest="$OUT_DIR/$abi"; mkdir -p "$dest"
   cp "$src/providers/fips.so" "$dest/fips.so"
   echo ">>> wrote $dest/fips.so"
-  file "$dest/fips.so"; sha256sum "$dest/fips.so"
+  file "$dest/fips.so" 2>/dev/null || true   # `file` is absent on some minimal images (e.g. androidbuild Ubuntu 26.04)
+  sha256sum "$dest/fips.so"
 done
 
 echo ">>> done."
