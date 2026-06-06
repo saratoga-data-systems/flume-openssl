@@ -16,14 +16,17 @@
 #     -fcf-protection / -fstack-protector / other hardening flags — build changes
 #     that alter generated code void the validation.  (Harden the base library +
 #     the flume app instead; those are outside the FIPS boundary.)
-#   * To MATCH the validated build (§5.3) AND get ONE portable .so for the whole
-#     arch family, build the x86_64 module on the LOWEST-glibc tested OE:
-#     Debian 11.5 / gcc 10.2.1 (glibc 2.31).  One fips.so then runs across modern
-#     x86_64 Linux (RHEL 9 = 2.34, Ubuntu 20.04+, Debian 11/12).  (Ubuntu 22.04 /
-#     gcc 11.2.0 is also a tested OE but glibc 2.35 = narrower reach.)  Cutoff: a
-#     glibc-2.31 .so won't load on RHEL 8 (2.28) or older.  Non-tested OEs
-#     (aarch64/armv7l/i686) have no validated config to match — build per policy
-#     and rely on the FIPS 140-3 operational-environment portability provision.
+#   * Runtime reach is set by the glibc-2.34 libpthread-into-libc merge, NOT by
+#     the build glibc per se.  A module built on glibc < 2.34 floors LOW and runs
+#     everywhere (verified: x86_64 on Debian 11.5 -> GLIBC_2.14; aarch64 -> 2.17;
+#     armv7l on Debian 11 -> 2.16 — all load on RHEL 8 = 2.28 + everything newer).
+#     A module built on glibc >= 2.34 (Bookworm 2.36, RHEL 9, Ubuntu 24) picks up
+#     GLIBC_2.34 pthread symbols and will NOT load on RHEL 8 / Bullseye (2.31) or
+#     older.  So build each arch on a PRE-2.34 glibc: x86_64 -> Debian 11.5 (gcc
+#     10.2.1, a §5.3 tested OE); aarch64 + armv7l -> Debian 11 (Bullseye).  x86_64
+#     is the only tested OE; the rest are vendor-affirmed under the FIPS 140-3 OE
+#     portability provision.  Confirm the floor afterward with:
+#        readelf -V <fips.so> | grep -oE 'GLIBC_[0-9.]+' | sort -uV | tail
 #
 # Usage:
 #   ./build-fips-provider                       # native build for this arch
@@ -38,11 +41,14 @@ JOBS="${JOBS:-$(nproc)}"
 WORK="${WORK:-/tmp/flume-fips-build}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# ARCH = repo dir; CONF = explicit OpenSSL Configure target (mirrors
+# build-base-libs).  armv8l = 32-bit userland (setarch linux32) on an ARMv8 host
+# such as the pi64build agent building the armv7l module.
 case "$(uname -m)" in
-  x86_64)    ARCH=x86_64_linux ;;
-  aarch64)   ARCH=aarch64_linux ;;
-  armv7l)    ARCH=armv7l_linux ;;
-  i686|i386) ARCH=i686_linux ;;
+  x86_64)        ARCH=x86_64_linux;  CONF=linux-x86_64 ;;
+  aarch64)       ARCH=aarch64_linux; CONF=linux-aarch64 ;;
+  armv7l|armv8l) ARCH=armv7l_linux;  CONF=linux-armv4 ;;
+  i686|i386)     ARCH=i686_linux;    CONF=linux-x86 ;;
   *) echo "ERROR: unmapped arch $(uname -m)" >&2; exit 1 ;;
 esac
 DEST_DIR="${DEST_DIR:-$REPO_ROOT/openssl/$ARCH}"
@@ -62,7 +68,10 @@ rm -rf "openssl-$OSSL_VER"
 tar xzf "$TARBALL"
 cd "openssl-$OSSL_VER"
 
-CONFIGURE_ARGS=(enable-fips)
+# Pass the EXPLICIT target ($CONF) -- letting Configure auto-guess picked a bad
+# armv7 config (forced -march=armv7-a, reset the FPU -> "lacks an FPU" build
+# error).  Mirrors build-base-libs, which never hit this.
+CONFIGURE_ARGS=("$CONF" enable-fips)
 [ -n "${CC:-}" ] && CONFIGURE_ARGS+=("CC=$CC")
 echo ">>> ./Configure ${CONFIGURE_ARGS[*]}"
 ./Configure "${CONFIGURE_ARGS[@]}"
