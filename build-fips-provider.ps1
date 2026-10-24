@@ -54,6 +54,19 @@
 #
 # Output: openssl\win64\fips.dll (+ a fipsmodule.cnf.sample).  The SHIPPED
 # fipsmodule.cnf is generated per-install by `flume --fips-install`.
+#
+# SIGNING (-Sign; WWH, as the FIPS/ATO owner, 2026-10-23): the committed
+# win64\fips.dll is Authenticode-signed ONCE, here, between the copy and the
+# sample fipsinstall -- BEFORE any integrity value is computed over it, so the
+# sample and every install's `flume --fips-install` MAC the signed bytes.
+# Signing after that value exists breaks the module's self-test.  -Sign runs
+# flume's flume-windows-installer\sign-files.ps1 -FipsModule (Azure Artifact
+# Signing), so it needs this repo checked out as flume's openssl submodule, the
+# signing client, and the signer's AZURE_TENANT_ID / AZURE_CLIENT_ID /
+# AZURE_CLIENT_SECRET in the environment.  A module meant for commit is built
+# with -Sign; without it the module stays unsigned (fine for a test build).
+# README.md records the signed module's hashes and what the signature changes.
+param([switch]$Sign)
 
 $ErrorActionPreference = 'Stop'
 $RepoOsslDir = $PSScriptRoot                      # = openssl\ (the repo dir)
@@ -219,6 +232,19 @@ New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 Copy-Item 'providers\fips.dll' (Join-Path $Dest 'fips.dll') -Force
 Write-Host ">>> wrote $Dest\fips.dll"
 Write-Host ('fips.dll SHA-256: ' + (Get-FileHash (Join-Path $Dest 'fips.dll') -Algorithm SHA256).Hash)
+
+# --- the signature, BEFORE the sample fipsinstall below (see SIGNING above) ---
+if ($Sign) {
+    $signFiles = Join-Path $RepoOsslDir '..\flume-windows-installer\sign-files.ps1'
+    if (-not (Test-Path -LiteralPath $signFiles)) {
+        throw "-Sign: no $signFiles -- run this from the openssl submodule of a flume checkout"
+    }
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $signFiles -FipsModule (Join-Path $Dest 'fips.dll')
+    if ($LASTEXITCODE -ne 0) { throw "-Sign: sign-files.ps1 failed ($LASTEXITCODE); fips.dll is NOT signed" }
+    Write-Host ('signed fips.dll SHA-256: ' + (Get-FileHash (Join-Path $Dest 'fips.dll') -Algorithm SHA256).Hash)
+} else {
+    Write-Warning 'fips.dll is UNSIGNED (no -Sign): fine for a test build; a module meant for commit is built with -Sign'
+}
 
 # --- reference fipsmodule.cnf (proves self-tests + integrity MAC).  The SHIPPED
 #     fipsmodule.cnf is regenerated per-install by `flume --fips-install`. ---

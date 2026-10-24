@@ -13,6 +13,7 @@ Per platform (`x86_64_linux`, `aarch64_linux`, `armv7l_linux`, `i686_linux`, `wi
   `no-shared`), statically linked into `flume`. Outside the FIPS boundary.
 - `fips.so` / `fips.dll` — the **CMVP-validated FIPS provider** (OpenSSL 3.1.2,
   cert #4985), built per its Security Policy with no extra flags. Loaded at runtime.
+  `win64/fips.dll` is Authenticode-signed (below).
 - `openssl` — the static OpenSSL CLI, kept per platform for testing.
 
 Plus a **single, shared** set of OpenSSL headers at `include/`, used by all platforms.
@@ -29,6 +30,37 @@ all-platforms-together. The base libraries track the latest **OpenSSL 3.5.x LTS*
 
 - Base libs + CLI: `./build-base-libs` (Linux, native per arch) / `build-base-libs.ps1` (Windows).
 - FIPS provider: `./build-fips-provider` (Linux) / `-android` (NDK) / `.ps1` (Windows).
+
+## Windows: `fips.dll` is Authenticode-signed (2026-10-24)
+
+`win64/fips.dll` is the module `build-fips-provider.ps1` builds from the validated 3.1.2 source (Security
+Policy sec. 11.1), **signed once** with Saratoga Data Systems' code-signing identity: Azure Artifact
+Signing, Public Trust, signer `CN="Saratoga Data Systems, Inc."`, timestamped by Microsoft's RFC 3161
+authority.
+
+- **Signed before any integrity value exists.**  The policy's integrity test is an HMAC over the whole file,
+  computed per host at install by `flume --fips-install` (or `openssl fipsinstall`), so every install's
+  value covers the signed bytes.  Signing a module AFTER its value was computed would break the self-test.
+  The decision is the FIPS/ATO owner's (WWH, 2026-10-23).
+- **What the signature changes:** a certificate table appended to the file (15,712 bytes) and three PE
+  header fields: the optional header's `CheckSum`, and the `SECURITY` data directory's address and size.
+  Every other byte is the unsigned build's, so the module's code and data are unchanged.
+
+  | `win64/fips.dll` | SHA-256 |
+  |---|---|
+  | as built, unsigned | `d947c7dd1765ec40e6df67afc6348506da790aa8cb137fdf001a6a55d33b98c3` |
+  | as committed, signed | `d62784976779209fdf03c6e0658111c41a2638433f935c496b4919e786d44541` |
+
+- **To check:**
+  - `signtool verify /pa /tw win64\fips.dll` verifies the signature and its timestamp.
+  - The signed file's first 2,876,416 bytes are the unsigned file's, apart from those three header fields.
+  - `signtool remove /s` restores the size but leaves a computed `CheckSum` where the build left 0.
+  - Measured on 2026-10-24: with the signed module, `flume --fips-install` passes the KATs and FIPS provider
+    3.1.2 loads.  With one byte of the signature changed, the module is refused.
+- **Re-sign only when the module is rebuilt:** `build-fips-provider.ps1 -Sign` signs between the copy and
+  `fipsinstall`, through flume's `flume-windows-installer/sign-files.ps1 -FipsModule`.  The signing
+  certificate's 3-day life does not matter, because the timestamp keeps the signature valid.  `fips.so`
+  (Linux, Android) is not signed.
 
 ## License
 
