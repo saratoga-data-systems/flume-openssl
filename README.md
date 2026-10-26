@@ -50,13 +50,20 @@ commit:
      `setarch linux32`, the way the Jenkinsfile runs the 32-bit stages (`uname -m` then reads `armv8l`, which the
      script maps to `armv7l_linux`);
    - Android: `build-base-libs-android` in CI's `androidbuild` image (its NDK);
-   - win64: `build-base-libs.ps1` on a box with Visual Studio, Strawberry Perl and NASM.
+   - win64: `build-base-libs.ps1` on a box with Visual Studio, Strawberry Perl and NASM, from an x64 prompt on
+     flume's own toolset, v143 (MSVC 14.44, cl 19.44): VS 2026's `vcvarsall.bat x64 -vcvars_ver=14.44`, or VS
+     2022's x64 Native Tools prompt.  flume.exe links these objects with v143's linker and ships the 14.44 VC++
+     redistributable, and Microsoft supports no newer compiler's objects under an older linker or runtime, so the
+     script refuses any other cl.  (VS 2026's prompt defaults to v145, cl 19.51, which built the 3.5.6 and the
+     first 3.5.9 libraries.)
 3. **Refresh the headers**, `include/openssl/*.h`, from the x86_64 build tree (a `no-shared` build).  Only the
    word-size block of `configuration.h` differs by platform, and flume calls no `BN_*` function, so one set serves
    every platform.
 4. **Check each library**: `OpenSSL X.Y.Z` in its strings, the hardening flags in its `compiler:` line, its
    compiler stamp (`readelf -p .comment` on one member), and its property note (`x86 feature: IBT, SHSTK` on
    x86_64, `AArch64 feature: BTI, PAC` on aarch64; armv7l's `readelf -A` reads `v7`, `Thumb-2`, `VFPv3-D16`).
+   On win64 the stamp is every member's `@comp.id` (`dumpbin /symbols`): each C object names cl 19.44's build
+   (product 0x0104), and the NASM objects carry none.
 5. **Commit every platform and the headers together.**  The FIPS providers (`fips.so`, `fips.dll`) are not
    touched.  Then bump flume's submodule pointer and run its full CI matrix, a release run included.
 
