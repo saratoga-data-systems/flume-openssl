@@ -24,7 +24,7 @@
 $ErrorActionPreference = 'Stop'
 $RepoOsslDir = $PSScriptRoot
 
-$OsslVer = if ($env:OSSL_VER) { $env:OSSL_VER } else { '3.5.2' }   # bump to latest 3.5.x
+$OsslVer = if ($env:OSSL_VER) { $env:OSSL_VER } else { '3.5.9' }   # bump to latest 3.5.x
 $Work    = Join-Path $env:TEMP 'flume-base-libs-build'
 $Dest    = Join-Path $RepoOsslDir 'win64'
 
@@ -36,8 +36,8 @@ $Dest    = Join-Path $RepoOsslDir 'win64'
 # stale [Environment]::CurrentDirectory can make those redirects truncate the
 # repo's own openssl\include\openssl\*.h.  Set-WorkLocation keeps both in sync so
 # every child write stays inside $Work.  (Updating the SHIPPED headers for a base
-# -lib version bump is a SEPARATE, explicit step -- see UpdateWinOpenssl.cmd --
-# never a build side-effect.)
+# -lib version bump is a SEPARATE, explicit step -- see README.md, 'Version
+# bump' -- never a build side-effect.)
 function Set-WorkLocation {
     param([string]$Path)
     Set-Location -LiteralPath $Path

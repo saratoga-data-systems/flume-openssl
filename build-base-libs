@@ -19,7 +19,7 @@
 # Output: openssl/<arch>/{libcrypto,libssl}.a
 #
 # Usage:
-#   OSSL_VER=3.5.7 ./build-base-libs               # override to a newer 3.5.x
+#   OSSL_VER=3.5.10 ./build-base-libs              # override to a newer 3.5.x
 #   DEST_DIR=/tmp/proof ./build-base-libs          # don't touch the repo
 #
 # Saves, per arch (openssl/<arch>/): libcrypto.a, libssl.a, AND the static
@@ -29,7 +29,7 @@
 #
 set -euo pipefail
 
-OSSL_VER="${OSSL_VER:-3.5.6}"   # latest 3.5.x LTS patch (CVE/bug fixes); bump as new ones ship
+OSSL_VER="${OSSL_VER:-3.5.9}"   # latest 3.5.x LTS patch (CVE/bug fixes); bump as new ones ship
 JOBS="${JOBS:-$(nproc)}"
 WORK="${WORK:-/tmp/flume-base-libs-build}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -39,16 +39,14 @@ case "$(uname -m)" in
   x86_64)    ARCH=x86_64_linux;   CONF=linux-x86_64;  HARDEN_ARCH="-fcf-protection=full" ;;
   aarch64)   ARCH=aarch64_linux;  CONF=linux-aarch64; HARDEN_ARCH="-mbranch-protection=standard" ;;
   armv7l|armv8l) ARCH=armv7l_linux; CONF=linux-armv4; HARDEN_ARCH="" ;;  # armv8l = 32-bit container on an ARMv8 host (e.g. the Pi under setarch linux32)
-  i686|i386) ARCH=i686_linux;     CONF=linux-x86;     HARDEN_ARCH="-fcf-protection=full" ;;
   *) echo "ERROR: unmapped arch $(uname -m)" >&2; exit 1 ;;
 esac
 DEST_DIR="${DEST_DIR:-$REPO_ROOT/openssl/$ARCH}"
 
 # Hardening common to all arches (base lib is outside the FIPS boundary so this
-# is allowed).  -fPIC so the static objects link into the PIE flume binary.
-# i686 has never had -fstack-clash-protection (matches makefile.arch.i686_linux).
-HARDEN="-fstack-protector-strong -fPIC $HARDEN_ARCH"
-[ "$ARCH" != i686_linux ] && HARDEN="$HARDEN -fstack-clash-protection"
+# is allowed).  -fPIC so the static objects link into the PIE flume binary.  Every arch gets
+# -fstack-clash-protection: i686, the one that never had it, was retired in Flume 3.5.0.
+HARDEN="-fstack-protector-strong -fPIC $HARDEN_ARCH -fstack-clash-protection"
 
 mkdir -p "$WORK"; cd "$WORK"
 TARBALL="openssl-$OSSL_VER.tar.gz"
