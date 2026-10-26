@@ -5,9 +5,15 @@
 #
 # Unlike build-fips-provider.ps1 (the validated FIPS module, which MUST use the
 # VS2019 sec.5.3 toolset), the BASE library is OUTSIDE the FIPS boundary and links
-# *with* flume.exe -- so build it with the SAME toolchain flume normally builds
-# with (your VS2026 x64 Native Tools prompt), track the latest 3.5.x for fixes,
-# and add hardening (/guard:cf, etc.).  (CET on Windows is the linker's
+# *with* flume.exe -- so build it with the SAME toolchain flume builds with: the
+# v143 toolset, MSVC 14.44 (cl 19.44), which the vcxprojs pin.  flume.exe links
+# these objects with v143's linker and ships the 14.44 VC++ redistributable, and
+# Microsoft supports no object from a newer compiler under an older linker or
+# runtime ("C++ binary compatibility 2015-2026").  VS 2026's x64 prompt defaults
+# to v145 (cl 19.51): open it with `vcvarsall.bat x64 -vcvars_ver=14.44`, or use
+# VS 2022's x64 Native Tools prompt.  The script refuses any other cl.  (The
+# 3.5.6 and first 3.5.9 libraries were built with cl 19.51; TPG13, 2026-10-26.)
+# Track the latest 3.5.x for fixes, and add hardening (/guard:cf, etc.).  (CET on Windows is the linker's
 # /CETCompat on flume.exe -- already set in the vcxprojs -- so the static base lib
 # needs no CET *compile* flag, unlike the Linux -fcf-protection.)
 #
@@ -65,6 +71,22 @@ foreach ($t in 'perl','nmake','nasm') {
         throw "$t not found on PATH -- run from an x64 Native Tools prompt with Strawberry Perl + NASM."
     }
 }
+
+# The compiler must be v143's cl 19.44 for x64 (see the header).  Checked before any work, so a wrong prompt
+# builds nothing.  cmd merges cl's banner (stderr) into stdout, so PowerShell sees no error record.
+$clPath = (Get-Command cl -ErrorAction SilentlyContinue).Source
+if (-not $clPath) {
+    throw "cl not found on PATH -- run from an x64 prompt opened with 'vcvarsall.bat x64 -vcvars_ver=14.44'."
+}
+$clBanner = @(cmd /c 'cl 2>&1') | Where-Object { $_ -match 'Compiler Version' } | Select-Object -First 1
+if ("$clBanner" -notmatch 'Version 19\.44\.\d+ for x64') {
+    throw ("refusing to build: the cl on PATH is not v143's 19.44 for x64.`n" +
+           "  found: $clBanner`n" +
+           "  at:    $clPath`n" +
+           "  cure:  open the prompt with 'vcvarsall.bat x64 -vcvars_ver=14.44' (VS 2026), or use VS 2022's x64 " +
+           "Native Tools prompt.")
+}
+Write-Host "compiler OK: $clBanner ($clPath)"
 
 New-Item -ItemType Directory -Force -Path $Work | Out-Null
 Set-WorkLocation $Work
