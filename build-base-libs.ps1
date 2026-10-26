@@ -25,7 +25,7 @@
 #   2. The MSVC hardening flag set (/guard:cf [+ /Qspectre /sdl ...]).
 #   `git pull` before editing and before pushing (main tracks origin/main). ***
 #
-# Output: openssl\win64\libcrypto_static.lib, libssl_static.lib
+# Output: openssl\win64\libcrypto_static.lib, libssl_static.lib, ossl_static.pdb (their debug info)
 
 $ErrorActionPreference = 'Stop'
 $RepoOsslDir = $PSScriptRoot
@@ -119,6 +119,12 @@ Invoke-Checked 'nmake' @()
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 Copy-Item 'libcrypto.lib' (Join-Path $Dest 'libcrypto_static.lib') -Force
 Copy-Item 'libssl.lib'    (Join-Path $Dest 'libssl_static.lib')    -Force
+# The two libraries' debug information (/Zi /Fdossl_static.pdb), from this same build.  Each object names the PDB
+# by its path in THIS build tree, which no other box has; the linker then looks beside the library.  Without it
+# every flume link prints LNK4099 for each of the ~795 OpenSSL objects it pulls in and links them without debug
+# info (CI build 2800: 7,950 lines, its only warning); with it the link is silent.  Measured 2026-10-26.
+if (-not (Test-Path 'ossl_static.pdb')) { throw 'ossl_static.pdb not found -- the libraries debug info is missing' }
+Copy-Item 'ossl_static.pdb' (Join-Path $Dest 'ossl_static.pdb') -Force
 # Save the openssl CLI too (apps\openssl.exe), like the Linux build, so every
 # platform's tests can use the SAME-version bundled CLI for keygen/verify.
 # (Android is the one exception: its CLI is cross-compiled and cannot run on
@@ -129,5 +135,5 @@ if (Test-Path 'apps\openssl.exe') {
 } else {
     Write-Warning 'apps\openssl.exe not found -- CLI not saved (check the nmake output)'
 }
-Write-Host ">>> wrote $Dest\libcrypto_static.lib + libssl_static.lib  (OpenSSL $OsslVer, hardened)"
+Write-Host ">>> wrote $Dest\libcrypto_static.lib + libssl_static.lib + ossl_static.pdb  (OpenSSL $OsslVer, hardened)"
 Write-Host '>>> done.  Rebuild flume.sln against these to pick up the fixes.'
