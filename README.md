@@ -15,6 +15,11 @@ Per platform (`x86_64_linux`, `aarch64_linux`, `armv7l_linux`, `win64`, `android
   cert #4985), built per its Security Policy with no extra flags. Loaded at runtime.
   `win64/fips.dll` is Authenticode-signed (below).
 - `openssl` — the static OpenSSL CLI, kept per platform for testing.
+- `win64/ossl_static.pdb` — the debug information for win64's `libcrypto_static.lib` / `libssl_static.lib`
+  (MSVC `/Zi` puts it in a separate file).  Each object names this PDB by its path in the build tree, which no
+  other box has, and the linker then looks beside the library.  Without it, every link prints LNK4099 795 times
+  and OpenSSL's frames have no symbols; with it, a flume link prints nothing.  It must come from the same build
+  as the two libraries, so `build-base-libs.ps1` copies all three together.
 
 Plus a **single, shared** set of OpenSSL headers at `include/`, used by all platforms.
 
