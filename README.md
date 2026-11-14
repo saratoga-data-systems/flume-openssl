@@ -43,17 +43,24 @@ commit:
 
 1. **Get the release** `openssl-X.Y.Z.tar.gz` and check it against OpenSSL's published `.sha256`.  The scripts
    check it when they can fetch it; a container without curl prints the hash to check by hand.
-2. **Build each platform** with `OSSL_VER=X.Y.Z`.  Every Linux arch is built in **Debian 11 (bullseye, GCC 10.2.1,
-   glibc 2.31)**, the environment the libraries' `.comment` sections name, so they link on every supported
-   distribution down to Ubuntu 20.04:
+2. **Build each platform** with `OSSL_VER=X.Y.Z`.  Every Linux arch but armv7l is built in **Debian 11 (bullseye,
+   GCC 10.2.1, glibc 2.31)**, the environment the libraries' `.comment` sections name, so they link on every
+   supported distribution down to Ubuntu 20.04:
    - x86_64: `build-base-libs` in an amd64 `debian:bullseye` container.  Bullseye is past its LTS, and
      deb.debian.org's security pool no longer serves every file its index lists, so point apt at the image's own
      `snapshot.debian.org` lines (`-o Acquire::Check-Valid-Until=false`) and install with
      `--no-install-recommends`: `gcc make perl libc6-dev curl ca-certificates`;
    - aarch64: `build-base-libs` in CI's `pi64bullseyebuild` image on pi64build;
-   - armv7l: `build-base-libs` in CI's `pi32bullseyebuild` image on pi64build, under `--platform linux/arm/v7` and
-     `setarch linux32`, the way the Jenkinsfile runs the 32-bit stages (`uname -m` then reads `armv8l`, which the
-     script maps to `armv7l_linux`);
+   - armv7l: `build-base-libs` in CI's **`pi32bookwormbuild`** image on pi64build (Debian 12, GCC 12.2, glibc 2.36),
+     under `--platform linux/arm/v7` and `setarch linux32`, the way the Jenkinsfile runs the 32-bit stages (`uname -m`
+     then reads `armv8l`, which the script maps to `armv7l_linux`).  **This arch is built at a 64-bit `time_t`**
+     (`-D_TIME_BITS=64`), as flume builds every Pi32 image since 2026-11-13: a library built at 32 bits reads a
+     `time_t` argument from the wrong registers, and on Pi32 Trixie, whose gcc already defaulted to 64 bits, flume's
+     certificate validity check judged every peer against a garbage "now" that way.  The 64-bit time interfaces need
+     glibc 2.34, so Bullseye cannot build it: the script refuses a glibc older than 2.34, and checks that the
+     libraries call only the 64-bit interfaces (`__time64`, never `time`).  Flume's `src/check_armv7_openssl_time64.sh`
+     reads the committed libraries the same way.  The libraries then need glibc 2.34 or later to link, which every
+     Pi32 image flume builds in has (Bookworm, Trixie);
    - Android: `build-base-libs-android` in CI's `androidbuild` image (its NDK);
    - win64: `build-base-libs.ps1` on a box with Visual Studio, Strawberry Perl and NASM, from an x64 prompt on
      flume's own toolset, v143 (MSVC 14.44, cl 19.44): VS 2026's `vcvarsall.bat x64 -vcvars_ver=14.44`, or VS
@@ -66,7 +73,8 @@ commit:
    every platform.
 4. **Check each library**: `OpenSSL X.Y.Z` in its strings, the hardening flags in its `compiler:` line, its
    compiler stamp (`readelf -p .comment` on one member), and its property note (`x86 feature: IBT, SHSTK` on
-   x86_64, `AArch64 feature: BTI, PAC` on aarch64; armv7l's `readelf -A` reads `v7`, `Thumb-2`, `VFPv3-D16`).
+   x86_64, `AArch64 feature: BTI, PAC` on aarch64; armv7l's `readelf -A` reads `v7`, `Thumb-2`, `VFPv3-D16`, and its
+   `compiler:` line carries `-D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64`).
    On win64 the stamp is every member's `@comp.id` (`dumpbin /symbols`): each C object names cl 19.44's build
    (product 0x0104), and the NASM objects carry none.
 5. **Commit every platform and the headers together.**  The FIPS providers (`fips.so`, `fips.dll`) are not

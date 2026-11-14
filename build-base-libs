@@ -43,6 +43,23 @@ case "$(uname -m)" in
 esac
 DEST_DIR="${DEST_DIR:-$REPO_ROOT/openssl/$ARCH}"
 
+# armv7 at a 64-bit time_t (2026-11-13, flume's SEC-pi32-trixie-certificate-validity-reads-a-garbage-now).  Flume
+# builds every Pi32 image with -D_TIME_BITS=64 (builds/makefile.arch.armv7l_linux; Debian's gcc predefines it from
+# Trixie on), and a library built at 32 bits reads a time_t argument from the wrong registers: on Pi32 Trixie the
+# certificate validity check judged every peer against a garbage "now".  glibc has the 64-bit time interfaces from
+# 2.34, so this arch is built in pi32bookwormbuild (Debian 12, glibc 2.36), not Bullseye (2.31), and refused below
+# 2.34.  The libraries then reference glibc 2.34's symbols, which every Pi32 image flume builds in has.
+TIME_ARCH=""
+TIME32_SYMS='time|gmtime_r|localtime_r|gmtime|localtime|mktime|timegm|clock_gettime|gettimeofday|nanosleep|select|stat|fstat|lstat|fstatat|futimens|utimensat'
+if [ "$ARCH" = armv7l_linux ]; then
+  TIME_ARCH="-D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64"
+  GLIBC_VER="$(getconf GNU_LIBC_VERSION | awk '{print $2}')"
+  if [ "$(printf '%s\n' 2.34 "$GLIBC_VER" | sort -V | head -1)" != 2.34 ]; then
+    echo "ERROR: armv7l needs glibc 2.34 or later for a 64-bit time_t; this is ${GLIBC_VER:-unknown} (build it in pi32bookwormbuild)" >&2
+    exit 1
+  fi
+fi
+
 # Hardening common to all arches (base lib is outside the FIPS boundary so this
 # is allowed).  -fPIC so the static objects link into the PIE flume binary.  Every arch gets
 # -fstack-clash-protection: i686, the one that never had it, was retired in Flume 3.5.0.
@@ -64,11 +81,22 @@ fi
 rm -rf "openssl-$OSSL_VER"; tar xzf "$TARBALL"; cd "openssl-$OSSL_VER"
 echo ">>> Configure $CONF (static + hardened), OpenSSL $OSSL_VER, arch $ARCH"
 echo ">>> hardening: $HARDEN"
+[ -n "$TIME_ARCH" ] && echo ">>> time: $TIME_ARCH (glibc $GLIBC_VER)"
 # no-shared = static libs only; no-tests = skip the test suite (faster).
-./Configure "$CONF" no-shared no-tests $HARDEN
+./Configure "$CONF" no-shared no-tests $HARDEN $TIME_ARCH
 make -j"$JOBS"
 
 test -f libcrypto.a && test -f libssl.a || { echo "ERROR: static libs not built" >&2; exit 1; }
+# armv7l: the libraries must call only the 64-bit time interfaces (flume's src/check_armv7_openssl_time64.sh reads the
+# committed ones the same way).  __time64 is the known positive: OpenSSL calls time() in a dozen places.
+if [ "$ARCH" = armv7l_linux ]; then
+  T32="$(nm libcrypto.a libssl.a 2> /dev/null | awk '$1 == "U" {print $2}' | grep -xE "$TIME32_SYMS" | sort -u | tr '\n' ' ' || true)"
+  [ -z "$T32" ] || { echo "ERROR: the armv7l libraries still call 32-bit time interfaces: $T32" >&2; exit 1; }
+  # awk reads to the end: a grep -q that stops early would SIGPIPE nm and fail the pipeline under pipefail.
+  nm libcrypto.a 2> /dev/null | awk '$1 == "U" && $2 == "__time64" {f = 1} END {exit !f}' ||
+    { echo "ERROR: libcrypto.a does not call __time64: was $TIME_ARCH applied?" >&2; exit 1; }
+  echo ">>> time: the libraries call only the 64-bit time interfaces"
+fi
 mkdir -p "$DEST_DIR"
 cp libcrypto.a libssl.a "$DEST_DIR/"
 # Save the static `openssl` CLI too — one per arch, alongside the libs +
